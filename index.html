@@ -142,6 +142,12 @@ textarea{width:100%;min-height:200px;font-family:ui-monospace,monospace;font-siz
 @keyframes flup{from{background:color-mix(in srgb,var(--good) 30%,transparent)}to{background:transparent}}
 @keyframes fldn{from{background:color-mix(in srgb,var(--bad) 25%,transparent)}to{background:transparent}}
 td.flash-up{animation:flup 2s ease-out}
+.news-item{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;padding:10px 0;border-bottom:1px solid var(--line)}
+.news-item a{color:var(--ink);text-decoration:none;font-weight:600}
+.news-item a:hover{color:var(--accent);text-decoration:underline}
+.news-meta{grid-column:2;font-size:12px;color:var(--muted)}
+.tk{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;background:var(--chip-bg);color:var(--ink);white-space:nowrap;align-self:start;margin-top:2px}
+.fbtn.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 td.flash-down{animation:fldn 2s ease-out}
 @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
 </style>
@@ -170,6 +176,7 @@ td.flash-down{animation:fldn 2s ease-out}
     <a href="#goals" data-v="goals">Цели</a>
     <a href="#forecast" data-v="forecast">Прогноз капитала</a>
     <a href="#portfolio" data-v="portfolio">Портфель</a>
+    <a href="#news" data-v="news">Новости</a>
     <a href="#settings" data-v="settings">Источник данных</a>
   </nav>
 
@@ -332,6 +339,21 @@ td.flash-down{animation:fldn 2s ease-out}
         <h2>Проверка надёжности</h2>
         <div id="pChecks" class="planfact"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- НОВОСТИ -->
+  <section class="view" id="v-news">
+    <div class="card">
+      <div class="card-head"><h2>Выплаты и события</h2><span class="sub">ближайшие дивиденды и купоны по твоим бумагам · Мосбиржа</span></div>
+      <div class="tbl"><table id="evTbl"></table></div>
+      <p class="note" id="evNote" style="margin-top:8px"></p>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Новости по портфелю</h2><span class="sub" id="newsStamp"></span></div>
+      <div class="row" id="newsFilter" style="margin-bottom:10px"></div>
+      <div id="newsList" class="planfact"></div>
+      <p class="note" style="margin-top:10px">Заголовки за последние 7 дней из Google Новостей по названиям компаний из портфеля и по ключевой ставке. Метка «важно» стоит у новостей про дивиденды, отчётность, санкции, выкуп акций и решения ЦБ. Это подборка заголовков, а не рекомендация.</p>
     </div>
   </section>
 
@@ -751,7 +773,7 @@ async function load(){
     S = fromWorkbook(wb); renderAll();
     setStatus("ok", "Обновлено в " + new Date(data.updated || Date.now()).toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}));
     if (S.securities && S.securities.length) refreshQuotes();
-    refreshBroker();
+    refreshBroker().then(() => { refreshNews(); refreshEvents(); });
     const C = calc();
     if (!C.incP && !C.pVal && !S.goals.length) showMsg("", "Таблица пока пустая. Заполни жёлтые ячейки в листах «Бюджет», «Портфель», «Подушка», «Цели» и нажми «Обновить».");
     else showMsg("", "");
@@ -1306,8 +1328,93 @@ $("#logoutBtn").onclick = () => logout();
 $("#brokerOff").onclick = () => { setTok(""); S.broker = []; S.portfolio = S.portfolio.filter(p => !p.broker); brokerState = ""; renderAll(true); };
 $("#sheetLink").href = SHEET_URL; $("#sheetLink2").href = SHEET_URL;
 
+/* ---------- news & events ---------- */
+let NEWS = [], newsAt = null, newsState = "", newsFilter = "ALL", EVENTS = null, eventsAt = 0;
+const IMPORTANT = /дивиденд|отч[её]т|мсфо|рсбу|прибыл|выручк|санкц|байбек|buyback|обратн\w* выкуп|допэмисс|spo\b|делистинг|ставк|совет директоров|рекомендова|купон|дефолт|оферт/i;
+function holdings(){
+  const m = new Map();
+  for (const b of (S.broker || [])){ if (b.currency !== "rub" || b.instrumentType === "currency") continue;
+    const h = m.get(b.ticker) || {ticker:b.ticker, name:b.name, kind:b.instrumentType, type:b.type, qty:0}; h.qty += b.qty; m.set(b.ticker, h); }
+  for (const sc of (S.securities || [])){
+    const kind = /облиг|ОФЗ/i.test(sc.type) ? "bond" : /фонд|Золото/i.test(sc.type) ? "etf" : "share";
+    const h = m.get(sc.ticker) || {ticker:sc.ticker, name:sc.name, kind, type:sc.type, qty:0}; h.qty += sc.qty; m.set(sc.ticker, h); }
+  return [...m.values()];
+}
+function cleanName(n){ return (" " + String(n || "") + " ").replace(/["«»]/g, " ").replace(/\s(ПАО|ОАО|АО|НК|ао|ап|ап\.|ао\.)(?=\s)/g, " ").replace(/\s+/g, " ").trim(); }
+async function refreshNews(force){
+  if (!getKey() || !API_URL) return;
+  if (!force && newsAt && Date.now() - newsAt.getTime() < 15 * 60000) return;
+  const items = holdings().filter(h => h.kind === "share" || (h.kind === "bond" && !/^SU\d/.test(h.ticker)))
+    .map(h => ({ticker: h.ticker, q: '"' + (h.kind === "bond" ? cleanName(h.name).split(" ")[0] : cleanName(h.name)) + '"'}));
+  items.push({ticker: "ЦБ", q: '"ключевая ставка" Банк России'});
+  newsState = "loading"; renderNews();
+  try {
+    const r = await fetch(API_URL, {method:"POST", body: JSON.stringify({key: getKey(), mode:"news", items})});
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    const seen = new Set(), week = Date.now() - 7 * 86400000;
+    NEWS = (d.news || []).map(n => ({...n, t: Date.parse(n.date) || 0, imp: IMPORTANT.test(n.title)}))
+      .filter(n => n.t >= week && n.title && !seen.has(n.title) && seen.add(n.title))
+      .sort((a, b) => b.t - a.t).slice(0, 60);
+    newsAt = new Date(); newsState = "ok";
+  } catch(e){ newsState = "error"; }
+  renderNews();
+}
+function renderNews(){
+  const st = $("#newsStamp");
+  st.textContent = newsState === "loading" && !NEWS.length ? "Загружаю…" : newsState === "error" ? "Не удалось загрузить, повторю позже" : newsAt ? "обновлено в " + newsAt.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}) + " · автообновление каждые 15 минут" : "";
+  const tks = ["ALL", "IMP", ...new Set(NEWS.map(n => n.ticker))];
+  $("#newsFilter").replaceChildren(...tks.map(t => el("button", {class:"fbtn" + (newsFilter === t ? " on" : ""), onclick: () => { newsFilter = t; renderNews(); }}, t === "ALL" ? "Все" : t === "IMP" ? "Только важное" : t)));
+  const list = NEWS.filter(n => newsFilter === "ALL" || (newsFilter === "IMP" ? n.imp : n.ticker === newsFilter)).slice(0, 30);
+  $("#newsList").replaceChildren(...(list.length ? list.map(n => el("div", {class:"news-item"},
+    el("span", {class:"tk", text:n.ticker}),
+    el("a", {href:n.link, target:"_blank", rel:"noopener noreferrer", text:n.title}),
+    el("div", {class:"news-meta"}, (n.imp ? pill("важно", "warn") : null), n.imp ? " " : "", (n.source ? n.source + " · " : "") + new Date(n.t).toLocaleString("ru-RU", {day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"}))
+  )) : [el("p", {class:"note", text: newsState === "ok" ? "Свежих новостей по портфелю за неделю нет." : ""})]));
+}
+async function refreshEvents(force){
+  if (!force && EVENTS && Date.now() - eventsAt < 6 * 3600000) { renderEvents(); return; }
+  const hs = holdings().filter(h => h.kind === "share" || h.kind === "bond");
+  if (!hs.length){ EVENTS = []; renderEvents(); return; }
+  const today = new Date().toISOString().slice(0, 10), out = [];
+  await Promise.all(hs.map(async h => {
+    try {
+      if (h.kind === "share"){
+        const r = await fetch("https://iss.moex.com/iss/securities/" + encodeURIComponent(h.ticker) + "/dividends.json?iss.meta=off");
+        const j = await r.json(); const c = j.dividends.columns, rows = j.dividends.data;
+        const ix = n => c.indexOf(n);
+        rows.filter(x => x[ix("registryclosedate")] >= today).forEach(x => out.push({ticker:h.ticker, name:h.name, kind:"Дивиденд", date:x[ix("registryclosedate")], per:x[ix("value")], total:x[ix("value")] * h.qty, note:"дата закрытия реестра"}));
+        if (!rows.some(x => x[ix("registryclosedate")] >= today) && rows.length){ const last = rows[rows.length - 1]; out.push({ticker:h.ticker, name:h.name, kind:"Последний дивиденд", date:last[ix("registryclosedate")], per:last[ix("value")], total:null, note:"новых объявлений нет"}); }
+      } else {
+        const r = await fetch("https://iss.moex.com/iss/statistics/engines/stock/markets/bonds/bondization/" + encodeURIComponent(h.ticker) + ".json?iss.meta=off&iss.only=coupons&limit=100");
+        const j = await r.json(); const c = j.coupons.columns, ix = n => c.indexOf(n);
+        const next = j.coupons.data.filter(x => x[ix("coupondate")] >= today).sort((a,b) => a[ix("coupondate")] < b[ix("coupondate")] ? -1 : 1)[0];
+        if (next) out.push({ticker:h.ticker, name:h.name, kind:"Купон", date:next[ix("coupondate")], per:next[ix("value_rub")], total: next[ix("value_rub")] != null ? next[ix("value_rub")] * h.qty : null, note:"дата выплаты"});
+      }
+    } catch(e){}
+  }));
+  EVENTS = out.sort((a,b) => (a.total == null) - (b.total == null) || (a.date < b.date ? -1 : 1)); eventsAt = Date.now();
+  renderEvents();
+}
+function renderEvents(){
+  const t = $("#evTbl"); t.replaceChildren();
+  t.append(el("thead", {}, el("tr", {}, ["Дата","Тикер","Бумага","Событие","На 1 шт","Тебе придёт (до налога)"].map((h,i) => el("th", {class: i > 3 ? "num" : null, text:h})))));
+  const tb = el("tbody");
+  if (!EVENTS) tb.append(el("tr", {}, el("td", {colspan:6, class:"sub", text:"Загружаю…"})));
+  else if (!EVENTS.length) tb.append(el("tr", {}, el("td", {colspan:6, class:"sub", text:"Нет акций или облигаций в портфеле."})));
+  else for (const e of EVENTS) tb.append(el("tr", {},
+    el("td", {style:"padding:8px 6px;white-space:nowrap", text: new Date(e.date + "T12:00:00").toLocaleDateString("ru-RU", {day:"numeric", month:"short", year:"numeric"})}),
+    el("td", {style:"padding:8px 6px;font-weight:700", text:e.ticker}),
+    el("td", {style:"padding:8px 6px", text:e.name}),
+    el("td", {style:"padding:8px 6px"}, e.total == null ? el("span", {class:"sub", text: e.kind + " · " + e.note}) : [e.kind, el("span", {class:"sub", text:" · " + e.note})]),
+    el("td", {class:"num", text: e.per != null ? fmt(e.per, 2) + " ₽" : "—"}),
+    el("td", {class:"num", style:"font-weight:600", text: e.total != null ? rub(e.total) : "—"})));
+  t.append(tb);
+  $("#evNote").textContent = "Дивиденд придёт, если бумага была на счёте к дате закрытия реестра (купить нужно минимум за 1 рабочий день до неё). С дивидендов и купонов брокер удержит НДФЛ.";
+}
+
 /* ---------- routing ---------- */
-const VIEWS = ["overview","budget","cushion","goals","forecast","portfolio","settings"];
+const VIEWS = ["overview","budget","cushion","goals","forecast","portfolio","news","settings"];
 function route(){
   const h = (location.hash || "").slice(1);
   const v = VIEWS.includes(h) ? h : "overview";
@@ -1329,6 +1436,7 @@ function autoTick(){
   if (document.hidden || !getKey()) return;
   if (Date.now() - lastSheetLoad > 5 * 60000){ lastSheetLoad = Date.now(); load(); }
   else { if (S.securities && S.securities.length) refreshQuotes(); refreshBroker(); }
+  refreshNews();
 }
 setInterval(autoTick, 60000);
 document.addEventListener("visibilitychange", autoTick);

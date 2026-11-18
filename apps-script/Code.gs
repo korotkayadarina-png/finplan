@@ -17,6 +17,11 @@ function doPost(e) {
   try { const b = JSON.parse((e && e.postData && e.postData.contents) || '{}'); key = b.key || ''; mode = b.mode || ''; } catch (err) {}
   const expected = PropertiesService.getScriptProperties().getProperty('API_KEY');
   if (!expected || key !== expected) return json_({ ok: false, error: 'unauthorized' });
+  if (mode === 'news') {
+    let items = [];
+    try { items = JSON.parse(e.postData.contents).items || []; } catch (err) {}
+    return json_({ ok: true, updated: new Date().toISOString(), news: newsFor_(items.slice(0, 16)) });
+  }
   if (mode === 'broker') {
     try { return json_({ ok: true, updated: new Date().toISOString(), broker: brokerPortfolio_() }); }
     catch (err) { return json_({ ok: false, error: String(err && err.message || err).indexOf('no_token') >= 0 ? 'no_token' : 'broker_error', detail: String(err && err.message || err).slice(0, 200) }); }
@@ -269,4 +274,36 @@ function testBroker() {
   const accs = {};
   b.forEach(function (x) { accs[x.account] = (accs[x.account] || 0) + 1; });
   console.log('Broker OK. Positions by account: ' + JSON.stringify(accs));
+}
+
+// ===================== News (Google News RSS, titles and links only) =====================
+function newsFor_(items) {
+  const cache = CacheService.getScriptCache();
+  const out = [];
+  items.forEach(function (it) {
+    const q = String(it.q || '').slice(0, 120);
+    if (!q) return;
+    const ck = 'n_' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, q)).slice(0, 20);
+    let list = null;
+    const c = cache.get(ck);
+    if (c) { try { list = JSON.parse(c); } catch (err) {} }
+    if (!list) {
+      list = [];
+      try {
+        const url = 'https://news.google.com/rss/search?q=' + encodeURIComponent(q + ' when:7d') + '&hl=ru&gl=RU&ceid=RU:ru';
+        const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+        if (res.getResponseCode() === 200) {
+          const root = XmlService.parse(res.getContentText()).getRootElement();
+          const ch = root.getChild('channel');
+          (ch ? ch.getChildren('item') : []).slice(0, 8).forEach(function (x) {
+            const src = x.getChild('source');
+            list.push({ title: x.getChildText('title') || '', link: x.getChildText('link') || '', date: x.getChildText('pubDate') || '', source: src ? src.getText() : '' });
+          });
+        }
+      } catch (err) {}
+      cache.put(ck, JSON.stringify(list), 1800);
+    }
+    list.forEach(function (n) { out.push({ ticker: it.ticker || '', title: n.title, link: n.link, date: n.date, source: n.source }); });
+  });
+  return out;
 }
