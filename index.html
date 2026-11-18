@@ -139,7 +139,11 @@ textarea{width:100%;min-height:200px;font-family:ui-monospace,monospace;font-siz
   .pf{grid-template-columns:90px 1fr}
   .pf .val{grid-column:1/-1;text-align:left;margin-top:-4px}
 }
-@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+@keyframes flup{from{background:color-mix(in srgb,var(--good) 30%,transparent)}to{background:transparent}}
+@keyframes fldn{from{background:color-mix(in srgb,var(--bad) 25%,transparent)}to{background:transparent}}
+td.flash-up{animation:flup 2s ease-out}
+td.flash-down{animation:fldn 2s ease-out}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
 <body>
@@ -602,7 +606,8 @@ async function fetchQuotes(tickers){
       if (!px) return;
       let unit = px;
       if (market === "bonds"){ const face = sx[ci("securities","FACEVALUE")] || 1000, aci = sx[ci("securities","ACCRUEDINT")] || 0; unit = px * face / 100 + aci; }
-      out[id] = {unit, time: pk("UPDATETIME"), yld: market === "bonds" && pk("YIELD") ? pk("YIELD") : null};
+      const prev = sx[ci("securities","PREVPRICE")];
+      out[id] = {unit, time: pk("UPDATETIME"), day: prev ? (px - prev) / prev : null, yld: market === "bonds" && pk("YIELD") ? pk("YIELD") : null};
     });
   }));
   return out;
@@ -613,7 +618,8 @@ async function refreshQuotes(){
     const q = await fetchQuotes(tks);
     for (const sc of S.securities){
       const qq = q[sc.ticker]; if (!qq) continue;
-      sc.price = qq.unit; sc.live = true;
+      sc.prevShown = sc.live ? sc.price : null;
+      sc.price = qq.unit; sc.live = true; sc.day = qq.day; sc.time = qq.time;
       const row = S.portfolio.find(p => p.id === "s_" + sc.ticker);
       if (row){ row.value = sc.qty * sc.price; }
     }
@@ -1068,10 +1074,10 @@ function renderForecast(C, skip){
 function renderSecurities(){
   const list = S.securities || [];
   const t = $("#secTbl"); t.replaceChildren();
-  $("#secStamp").textContent = !list.length ? "" : quotesErr ? "Мосбиржа не ответила, цены из таблицы" : quotesAt ? "Цены Мосбиржи на " + quotesAt.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}) + " (задержка ~15 мин)" : "Загружаю цены…";
-  t.append(el("thead", {}, el("tr", {}, ["Тикер","Название","Кол-во","Цена покупки","Цена сейчас","Стоимость","Результат"].map((h,i) => el("th", {class: i > 1 ? "num" : null, text:h})))));
+  $("#secStamp").textContent = !list.length ? "" : quotesErr ? "Мосбиржа не ответила, повторю через минуту" : quotesAt ? "● Цены Мосбиржи, обновлено в " + quotesAt.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit", second:"2-digit"}) + " · автообновление каждую минуту · задержка биржи ~15 мин" : "Загружаю цены…";
+  t.append(el("thead", {}, el("tr", {}, ["Тикер","Название","Кол-во","Цена покупки","Цена сейчас","За день","Стоимость","Результат"].map((h,i) => el("th", {class: i > 1 ? "num" : null, text:h})))));
   const tb = el("tbody");
-  if (!list.length) tb.append(el("tr", {}, el("td", {colspan:7, class:"sub", text:"Бумаг пока нет. Добавь их на листе «Бумаги» в таблице."})));
+  if (!list.length) tb.append(el("tr", {}, el("td", {colspan:8, class:"sub", text:"Бумаг пока нет. Добавь их на листе «Бумаги» в таблице."})));
   let tv = 0, ti = 0;
   for (const sc of list){
     const v = sc.qty * sc.price, inv = sc.qty * sc.buy, d = v - inv; tv += v; ti += inv;
@@ -1080,12 +1086,13 @@ function renderSecurities(){
       el("td", {style:"padding:8px 6px", text: sc.name}),
       el("td", {class:"num", text: fmt(sc.qty, 2)}),
       el("td", {class:"num", text: sc.buy ? fmt(sc.buy, 2) + " ₽" : "—"}),
-      el("td", {class:"num", text: fmt(sc.price, 2) + " ₽" + (sc.live ? "" : " *")}),
+      el("td", {class:"num" + (sc.prevShown != null && sc.prevShown !== sc.price ? (sc.price > sc.prevShown ? " flash-up" : " flash-down") : ""), text: fmt(sc.price, 2) + " ₽" + (sc.live ? "" : " *")}),
+      el("td", {class:"num", style:"color:" + (sc.day == null ? "var(--muted)" : sc.day >= 0 ? "var(--good)" : "var(--bad)"), text: sc.day == null ? "—" : (sc.day >= 0 ? "+" : "−") + pct(Math.abs(sc.day), 2)}),
       el("td", {class:"num", text: rub(v)}),
       el("td", {class:"num", style:"font-weight:600;color:" + (d >= 0 ? "var(--good)" : "var(--bad)"), text: inv ? (d >= 0 ? "+" : "−") + rub(Math.abs(d)) + " (" + (d >= 0 ? "+" : "−") + pct(Math.abs(d)/inv, 1) + ")" : "—"})
     ));
   }
-  if (list.length) tb.append(el("tr", {class:"total"}, el("td", {text:"Итого"}), el("td"), el("td"), el("td"), el("td"),
+  if (list.length) tb.append(el("tr", {class:"total"}, el("td", {text:"Итого"}), el("td"), el("td"), el("td"), el("td"), el("td"),
     el("td", {class:"num", text: rub(tv)}), el("td", {class:"num", text: ti ? (tv-ti >= 0 ? "+" : "−") + rub(Math.abs(tv-ti)) : "—"})));
   t.append(tb);
   if (list.some(x => !x.live) && quotesAt) $("#secStamp").textContent += " · * цена из таблицы";
@@ -1151,6 +1158,15 @@ new MutationObserver(() => renderAll(true)).observe(document.documentElement, {a
 renderAll();
 route();
 setAuthUI(); load();
+// Автообновление: цены каждую минуту, данные таблицы каждые 5 минут, только пока вкладка видна
+let lastSheetLoad = Date.now();
+function autoTick(){
+  if (document.hidden || !getKey()) return;
+  if (Date.now() - lastSheetLoad > 5 * 60000){ lastSheetLoad = Date.now(); load(); }
+  else if (S.securities && S.securities.length) refreshQuotes();
+}
+setInterval(autoTick, 60000);
+document.addEventListener("visibilitychange", autoTick);
 })();
 </script>
 </body>
