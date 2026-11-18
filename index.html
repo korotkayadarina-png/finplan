@@ -704,7 +704,7 @@ async function refreshBroker(){
         const qty = qv(pos.quantity); if (!qty) continue;
         const inf = pos.instrumentUid ? await instrument(pos.instrumentUid) : {ticker: pos.figi, name: ""};
         const price = qv(pos.currentPrice), nkd = qv(pos.currentNkd), avg = qv(pos.averagePositionPrice);
-        list.push({account: a.name || "Счёт", ticker: inf.ticker || pos.figi, name: inf.name || inf.ticker || pos.figi,
+        list.push({account: a.name || "Счёт", uid: pos.instrumentUid || "", ticker: inf.ticker || pos.figi, name: inf.name || inf.ticker || pos.figi,
           instrumentType: pos.instrumentType, type: bType(pos.instrumentType, inf.ticker, inf.name), qty, price, nkd, avg,
           currency: ((pos.currentPrice || {}).currency || "rub").toLowerCase(), value: qty * (price + nkd), invested: qty * avg, dailyYield: qv(pos.dailyYield)});
       }
@@ -1334,9 +1334,9 @@ const IMPORTANT = /дивиденд|отч[её]т|мсфо|рсбу|прибы�
 function holdings(){
   const m = new Map();
   for (const b of (S.broker || [])){ if (b.currency !== "rub" || b.instrumentType === "currency") continue;
-    const h = m.get(b.ticker) || {ticker:b.ticker, name:b.name, kind:b.instrumentType, type:b.type, qty:0}; h.qty += b.qty; m.set(b.ticker, h); }
+    const h = m.get(b.ticker) || {ticker:b.ticker, name:b.name, kind:b.instrumentType, type:b.type, qty:0, uid:b.uid}; h.qty += b.qty; if (!h.uid) h.uid = b.uid; m.set(b.ticker, h); }
   for (const sc of (S.securities || [])){
-    const kind = /облиг|ОФЗ/i.test(sc.type) ? "bond" : /фонд|Золото/i.test(sc.type) ? "etf" : "share";
+    const kind = /облиг|ОФЗ/i.test(sc.type) ? "bond" : (sc.type === "Фонд денежного рынка" || sc.type === "Золото") ? "etf" : "share";
     const h = m.get(sc.ticker) || {ticker:sc.ticker, name:sc.name, kind, type:sc.type, qty:0}; h.qty += sc.qty; m.set(sc.ticker, h); }
   return [...m.values()];
 }
@@ -1380,11 +1380,20 @@ async function refreshEvents(force){
   await Promise.all(hs.map(async h => {
     try {
       if (h.kind === "share"){
-        const r = await fetch("https://iss.moex.com/iss/securities/" + encodeURIComponent(h.ticker) + "/dividends.json?iss.meta=off");
-        const j = await r.json(); const c = j.dividends.columns, rows = j.dividends.data;
-        const ix = n => c.indexOf(n);
-        rows.filter(x => x[ix("registryclosedate")] >= today).forEach(x => out.push({ticker:h.ticker, name:h.name, kind:"Дивиденд", date:x[ix("registryclosedate")], per:x[ix("value")], total:x[ix("value")] * h.qty, note:"дата закрытия реестра"}));
-        if (!rows.some(x => x[ix("registryclosedate")] >= today) && rows.length){ const last = rows[rows.length - 1]; out.push({ticker:h.ticker, name:h.name, kind:"Последний дивиденд", date:last[ix("registryclosedate")], per:last[ix("value")], total:null, note:"новых объявлений нет"}); }
+        if (!getTok()) return;
+        let uid = h.uid;
+        if (!uid){
+          const ck = "uid_" + h.ticker;
+          uid = instCache[ck];
+          if (!uid){ const r0 = await tCall("InstrumentsService/GetInstrumentBy", {idType:"INSTRUMENT_ID_TYPE_TICKER", classCode:"TQBR", id:h.ticker}); uid = (r0.instrument || {}).uid; if (uid){ instCache[ck] = uid; try { localStorage.setItem("finplan_inst", JSON.stringify(instCache)); } catch(e){} } }
+        }
+        if (!uid) return;
+        const from = new Date(Date.now() - 365 * 86400000).toISOString(), to = new Date(Date.now() + 400 * 86400000).toISOString();
+        const d = await tCall("InstrumentsService/GetDividends", {instrumentId: uid, from, to});
+        const rows = (d.dividends || []).map(x => ({date: (x.recordDate || "").slice(0,10), lastBuy: (x.lastBuyDate || "").slice(0,10), per: qv(x.dividendNet)})).filter(x => x.date);
+        const up = rows.filter(x => x.date >= today);
+        up.forEach(x => out.push({ticker:h.ticker, name:h.name, kind:"Дивиденд", date:x.date, per:x.per, total:x.per * h.qty, note: x.lastBuy ? "купить до " + new Date(x.lastBuy + "T12:00:00").toLocaleDateString("ru-RU", {day:"numeric", month:"short"}) : "дата закрытия реестра"}));
+        if (!up.length && rows.length){ const last = rows.sort((a,b) => a.date < b.date ? 1 : -1)[0]; out.push({ticker:h.ticker, name:h.name, kind:"Последний дивиденд", date:last.date, per:last.per, total:null, note:"новых объявлений нет"}); }
       } else {
         const r = await fetch("https://iss.moex.com/iss/statistics/engines/stock/markets/bonds/bondization/" + encodeURIComponent(h.ticker) + ".json?iss.meta=off&iss.only=coupons&limit=100");
         const j = await r.json(); const c = j.coupons.columns, ix = n => c.indexOf(n);
@@ -1401,7 +1410,7 @@ function renderEvents(){
   t.append(el("thead", {}, el("tr", {}, ["Дата","Тикер","Бумага","Событие","На 1 шт","Тебе придёт (до налога)"].map((h,i) => el("th", {class: i > 3 ? "num" : null, text:h})))));
   const tb = el("tbody");
   if (!EVENTS) tb.append(el("tr", {}, el("td", {colspan:6, class:"sub", text:"Загружаю…"})));
-  else if (!EVENTS.length) tb.append(el("tr", {}, el("td", {colspan:6, class:"sub", text:"Нет акций или облигаций в портфеле."})));
+  else if (!EVENTS.length) tb.append(el("tr", {}, el("td", {colspan:6, class:"sub", text:"Ближайших выплат по бумагам портфеля пока не объявлено."})));
   else for (const e of EVENTS) tb.append(el("tr", {},
     el("td", {style:"padding:8px 6px;white-space:nowrap", text: new Date(e.date + "T12:00:00").toLocaleDateString("ru-RU", {day:"numeric", month:"short", year:"numeric"})}),
     el("td", {style:"padding:8px 6px;font-weight:700", text:e.ticker}),
@@ -1410,7 +1419,7 @@ function renderEvents(){
     el("td", {class:"num", text: e.per != null ? fmt(e.per, 2) + " ₽" : "—"}),
     el("td", {class:"num", style:"font-weight:600", text: e.total != null ? rub(e.total) : "—"})));
   t.append(tb);
-  $("#evNote").textContent = "Дивиденд придёт, если бумага была на счёте к дате закрытия реестра (купить нужно минимум за 1 рабочий день до неё). С дивидендов и купонов брокер удержит НДФЛ.";
+  $("#evNote").textContent = "Дивиденды из API Т-Банка (для всех акций, включая ИИС в Сбере), купоны с Мосбиржи. Дивиденд придёт, если бумага была на счёте до даты «купить до». С дивидендов и купонов брокер удержит НДФЛ." + (getTok() ? "" : " Чтобы видеть дивиденды, подключи токен Т-Инвестиций во вкладке «Портфель».");
 }
 
 /* ---------- routing ---------- */
