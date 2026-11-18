@@ -307,3 +307,22 @@ function newsFor_(items) {
   });
   return out;
 }
+
+// Run once: column "НДФЛ" in Бюджет (D6:D15, default 13%), income totals become net ("на руки").
+function setupIncomeTax() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const b = ss.getSheetByName('Бюджет');
+  b.getRange('B5').setValue('План до налога, ₽');
+  b.getRange('C5').setValue('Факт до налога, ₽');
+  b.getRange('D5').setValue('НДФЛ').setFontWeight('bold').setFontColor('#FFFFFF').setBackground('#16202B');
+  const d = b.getRange('D6:D15');
+  const cur = d.getValues();
+  d.setValues(cur.map(function (r) { return [r[0] === '' || r[0] === null ? 0.13 : r[0]]; }));
+  d.setNumberFormat('0%').setBackground('#FFF6CC').setFontColor('#0000FF');
+  b.getRange('A16').setValue('Итого на руки');
+  b.getRange('B16').setFormula(fx_(ss, '=SUMPRODUCT(B6:B15,1-D6:D15)'));
+  b.getRange('C16').setFormula(fx_(ss, '=SUMPRODUCT(C6:C15,1-D6:D15)'));
+  b.getRange('A17').setValue('Суммы вводятся до налога; в итог идёт сумма за вычетом НДФЛ из колонки D. Уже чистый доход — поставь 0%.')
+    .setFontSize(9).setFontColor('#5C6B7A').setFontWeight('normal');
+  console.log('Income tax column ready');
+}

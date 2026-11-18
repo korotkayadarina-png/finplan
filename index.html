@@ -811,7 +811,8 @@ function fromWorkbook(wb){
   for (let r = 6; r <= 15; r++){
     const name = t(B, "A"+r), plan = n(B, "B"+r), fact = n(B, "C"+r);
     if (!name && plan == null && fact == null) continue;
-    out.budget.income.push({id:"i"+r, name, plan: plan || 0, fact: fact || 0});
+    let tax = n(B, "D"+r); if (tax == null) tax = 0.13; if (tax > 1) tax = tax / 100;
+    out.budget.income.push({id:"i"+r, name, grossPlan: plan || 0, grossFact: fact || 0, tax, plan: (plan || 0) * (1 - tax), fact: (fact || 0) * (1 - tax)});
   }
   const GM = {"Обязательное":"need", "Желания":"want", "Сбережения":"save"};
   out.budget.expense = [];
@@ -1030,7 +1031,7 @@ function goalRow(g){
 
 function renderBudget(C, skip){
   $("#bTiles").replaceChildren(
-    tile("Доход: план / факт", short(C.incP) + " / " + short(C.incF), "₽ в месяц", "acc"),
+    tile("Доход на руки: план / факт", short(C.incP) + " / " + short(C.incF), "₽ в месяц, после НДФЛ", "acc"),
     tile("Расходы: план / факт", short(C.expP) + " / " + short(C.expF), C.expF > C.expP ? "факт выше плана на " + rub(C.expF - C.expP) : "в рамках плана", C.expF > C.expP ? "bad" : "good"),
     tile("Остаётся по плану", rub(C.savedP), "норма сбережений " + pct(C.rateP), C.rateP >= .2 ? "good" : C.rateP >= .1 ? "warn" : "bad"),
     tile("Остаётся по факту", rub(C.savedF), "норма " + pct(C.rateF), C.rateF >= .2 ? "good" : C.rateF >= .1 ? "warn" : "bad")
@@ -1038,8 +1039,10 @@ function renderBudget(C, skip){
   if (!skip){
     editTable($("#incomeTbl"), S.budget.income, [
       {key:"name", label:"Источник", w:"150px"},
-      {key:"plan", label:"План, ₽", type:"number", step:1000, min:0},
-      {key:"fact", label:"Факт, ₽", type:"number", step:1000, min:0}
+      {key:"_g", label:"До налога (план)", type:"computed", render: r => el("span", {class:"sub", text: rub(num(r.grossPlan))})},
+      {key:"_t", label:"НДФЛ", type:"computed", render: r => el("span", {class:"sub", text: pct(r.tax || 0)})},
+      {key:"plan", label:"На руки (план)", type:"number"},
+      {key:"fact", label:"На руки (факт)", type:"number"}
     ], {total: () => el("tr", {class:"total", id:"incTotal"})});
     editTable($("#expenseTbl"), S.budget.expense, [
       {key:"name", label:"Категория", w:"150px"},
@@ -1052,7 +1055,7 @@ function renderBudget(C, skip){
     // refresh computed deviation cells in place
     const tbE = $("#expenseTbl tbody"); if (tbE) S.budget.expense.forEach((r,i) => { const row = tbE.children[i]; if (row) row.children[4].replaceChildren(devCell(r)); });
   }
-  const it = $("#incTotal"); if (it) it.replaceChildren(el("td",{text:"Итого"}), el("td",{class:"num",text:rub(C.incP)}), el("td",{class:"num",text:rub(C.incF)}), el("td"));
+  const it = $("#incTotal"); if (it) it.replaceChildren(el("td",{text:"Итого на руки"}), el("td",{class:"num sub",text:rub(S.budget.income.reduce((t,r)=>t+num(r.grossPlan),0))}), el("td"), el("td",{class:"num",text:rub(C.incP)}), el("td",{class:"num",text:rub(C.incF)}));
   const et = $("#expTotal"); if (et) et.replaceChildren(el("td",{text:"Итого"}), el("td"), el("td",{class:"num",text:rub(C.expP)}), el("td",{class:"num",text:rub(C.expF)}), el("td",{class:"num"}, devCell({plan:C.expP, fact:C.expF})), el("td"));
 
   const inc = C.incP || 1;
