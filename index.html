@@ -309,8 +309,10 @@ td.flash-down{animation:fldn 2s ease-out}
     </div>
     <div class="card hide" id="brokerCard">
       <div class="card-head"><h2>Брокерский счёт (Т-Инвестиции)</h2><span class="sub" id="brokerStamp"></span></div>
+      <div id="brokerConnect"></div>
       <div class="tbl"><table id="brokerTbl"></table></div>
-      <p class="note" style="margin-top:10px">Позиции и цены приходят со счёта через API брокера с токеном «только для чтения». Обновляется каждую минуту, пока сайт открыт. Позиции в валюте показаны, но в рублёвые итоги не входят.</p>
+      <p class="note" style="margin-top:10px">Позиции и цены приходят со счёта через API Т-Банка с токеном «только для чтения». Сайт запрашивает их напрямую из твоего браузера каждую минуту, пока он открыт. Позиции в валюте показаны, но в рублёвые итоги не входят.</p>
+      <div class="row" style="margin-top:8px"><button id="brokerOff" class="hide">Отключить брокера на этом устройстве</button></div>
     </div>
     <div class="card">
       <div class="card-head"><h2>Биржевые бумаги</h2><span class="sub" id="secStamp"></span></div>
@@ -618,24 +620,84 @@ async function fetchQuotes(tickers){
   }));
   return out;
 }
-/* ---------- broker account via Apps Script (T-Invest read-only token stays in the script) ---------- */
-let brokerAt = null, brokerState = "";
+/* ---------- broker account: T-Invest API called directly from this browser (read-only token stored only on this device) ---------- */
+const TOK_NAME = "finplan_tinvest_token";
+function getTok(){ try { return localStorage.getItem(TOK_NAME) || ""; } catch(e){ return memTok; } }
+let memTok = "";
+function setTok(v){ memTok = v; try { if (v) localStorage.setItem(TOK_NAME, v); else localStorage.removeItem(TOK_NAME); } catch(e){} }
+const TINV = ["https://invest-public-api.tbank.ru/rest/", "https://invest-public-api.tinkoff.ru/rest/"];
+async function tCall(method, body){
+  let last;
+  for (const base of TINV){
+    try {
+      const r = await fetch(base + "tinkoff.public.invest.api.contract.v1." + method, {method:"POST",
+        headers:{"Content-Type":"application/json", "Authorization":"Bearer " + getTok()}, body: JSON.stringify(body || {})});
+      if (r.status === 401 || r.status === 403) throw {code:"auth"};
+      if (!r.ok){ last = {code:"http", status:r.status}; continue; }
+      return await r.json();
+    } catch(e){ if (e && e.code === "auth") throw e; last = e; }
+  }
+  throw last || {code:"net"};
+}
+const qv = m => m ? Number(m.units || 0) + Number(m.nano || 0) / 1e9 : 0;
+const instCache = {};
+try { Object.assign(instCache, JSON.parse(localStorage.getItem("finplan_inst") || "{}")); } catch(e){}
+async function instrument(uid){
+  if (instCache[uid]) return instCache[uid];
+  const r = await tCall("InstrumentsService/GetInstrumentBy", {idType:"INSTRUMENT_ID_TYPE_UID", id: uid});
+  const i = r.instrument || {};
+  instCache[uid] = {ticker: i.ticker || "", name: i.name || ""};
+  try { localStorage.setItem("finplan_inst", JSON.stringify(instCache)); } catch(e){}
+  return instCache[uid];
+}
+const MM = ["LQDT","AKMM","SBMM","TMON","CASH","AMNY","BCSD","PSMM","GPBM","MONY","SBMB","OPNS","YAMM"], GOLDT = ["GOLD","TGLD","AKGD","SBGD","GLDX","VTBG"];
+function bType(it, tk, nm){
+  const n = (nm || "").toLowerCase();
+  if (it === "share") return "Акции / фонды акций";
+  if (it === "bond") return /^SU\d/.test(tk) ? "ОФЗ" : "Корп. облигации";
+  if (it === "etf"){
+    if (MM.includes(tk) || /денеж|ликвид|деньг|ден\.? ?рын|накопит|money/.test(n)) return "Фонд денежного рынка";
+    if (GOLDT.includes(tk) || /золот|gold/.test(n)) return "Золото";
+    if (/офз|гособл|госдолг/.test(n)) return "ОФЗ";
+    if (/облиг|bond|долг/.test(n)) return "Корп. облигации";
+    return "Акции / фонды акций";
+  }
+  if (it === "currency") return /^RUB/.test(tk) ? "Наличные" : "Валюта";
+  return "Другое";
+}
+let brokerAt = null, brokerState = "", brokerBusy = false;
 async function refreshBroker(){
-  const key = getKey(); if (!key || !API_URL) return;
+  if (!getTok() || brokerBusy) { renderAll(true); return; }
+  brokerBusy = true;
   try {
-    const r = await fetch(API_URL, {method:"POST", body: JSON.stringify({key, mode:"broker"})});
-    const d = await r.json();
-    if (!d.ok){ brokerState = d.error || "error"; if (d.error === "unauthorized"){ return; } renderAll(true); return; }
-    const prev = {}; (S.broker || []).forEach(b => prev[b.account + "|" + b.ticker] = b.price);
-    S.broker = (d.broker || []).map(b => ({...b, prevShown: prev[b.account + "|" + b.ticker] != null ? prev[b.account + "|" + b.ticker] : null}));
+    const acc = await tCall("UsersService/GetAccounts", {});
+    const list = [];
+    for (const a of (acc.accounts || []).filter(a => a.status === "ACCOUNT_STATUS_OPEN")){
+      const p = await tCall("OperationsService/GetPortfolio", {accountId: a.id, currency: "RUB"});
+      for (const pos of (p.positions || [])){
+        const qty = qv(pos.quantity); if (!qty) continue;
+        const inf = pos.instrumentUid ? await instrument(pos.instrumentUid) : {ticker: pos.figi, name: ""};
+        const price = qv(pos.currentPrice), nkd = qv(pos.currentNkd), avg = qv(pos.averagePositionPrice);
+        list.push({account: a.name || "Счёт", ticker: inf.ticker || pos.figi, name: inf.name || inf.ticker || pos.figi,
+          instrumentType: pos.instrumentType, type: bType(pos.instrumentType, inf.ticker, inf.name), qty, price, nkd, avg,
+          currency: ((pos.currentPrice || {}).currency || "rub").toLowerCase(), value: qty * (price + nkd), invested: qty * avg, dailyYield: qv(pos.dailyYield)});
+      }
+    }
+    const prev = {}; (S.broker || []).forEach(b => prev[b.account + "|" + b.ticker] = {price: b.price, rate: b.rate});
+    S.broker = list.map(b => { const pv = prev[b.account + "|" + b.ticker]; return {...b, prevShown: pv ? pv.price : null, rate: pv ? pv.rate : 0}; });
     S.portfolio = S.portfolio.filter(p => !p.broker);
-    S.broker.filter(b => b.currency === "rub").forEach((b, i) => {
-      S.portfolio.push({id:"b_" + i, sec:true, broker:true, name: b.ticker + " · " + b.name, type: b.type, invested: b.invested, value: b.value, rate: b.rate || 0});
-    });
+    S.broker.filter(b => b.currency === "rub").forEach((b, i) => S.portfolio.push({id:"b_" + i, sec:true, broker:true, name: b.ticker + " · " + b.name, type: b.type, invested: b.invested, value: b.value, rate: b.rate || 0}));
     brokerAt = new Date(); brokerState = "ok";
     if (!S._bondYieldsLoaded) loadBrokerYields();
-  } catch(e){ brokerState = "error"; }
+  } catch(e){ brokerState = e && e.code === "auth" ? "auth" : "error"; }
+  brokerBusy = false;
   renderAll(true);
+}
+function connectBrokerUI(note){
+  const inp = el("input", {id:"tokInput", type:"password", class:"inl", placeholder:"Токен T-Invest API (только для чтения)", autocomplete:"off", style:"max-width:380px"});
+  const save = el("button", {class:"pri", onclick: () => { const v = inp.value.trim(); if (!v) return; setTok(v); brokerState = ""; refreshBroker(); }}, "Подключить");
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") save.click(); });
+  return el("div", {}, el("p", {class:"note", style:"margin-bottom:8px", text: note || "Вставь токен Т-Инвестиций «только для чтения». Он сохранится только в этом браузере на этом устройстве и отправляется только в Т-Банк."}), el("div", {class:"row"}, inp, save));
 }
 async function loadBrokerYields(){
   const bonds = (S.broker || []).filter(b => b.instrumentType === "bond" && b.currency === "rub").map(b => b.ticker);
@@ -1135,11 +1197,15 @@ function renderSecurities(){
   if (list.some(x => !x.live) && quotesAt) $("#secStamp").textContent += " · * цена из таблицы";
 }
 function renderBroker(){
-  const card = $("#brokerCard");
+  const card = $("#brokerCard"); card.classList.remove("hide");
   const list = S.broker || [];
-  if (!list.length && brokerState !== "error" && brokerState !== "broker_error"){ card.classList.add("hide"); return; }
-  card.classList.remove("hide");
-  $("#brokerStamp").textContent = brokerState === "ok" && brokerAt ? "● Со счёта, обновлено в " + brokerAt.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit", second:"2-digit"}) + " · автообновление каждую минуту" : "Брокер не ответил, повторю через минуту";
+  const box = $("#brokerConnect");
+  if (!getTok() || brokerState === "auth"){
+    box.replaceChildren(connectBrokerUI(brokerState === "auth" ? "Т-Банк не принял токен: возможно, он отозван или скопирован не целиком. Вставь токен ещё раз." : null));
+    $("#brokerStamp").textContent = ""; $("#brokerTbl").replaceChildren(); $("#brokerOff").classList.add("hide"); return;
+  }
+  box.replaceChildren(); $("#brokerOff").classList.remove("hide");
+  $("#brokerStamp").textContent = brokerState === "ok" && brokerAt ? "● Со счёта, обновлено в " + brokerAt.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit", second:"2-digit"}) + " · автообновление каждую минуту" : brokerState === "error" ? "Т-Банк не ответил, повторю через минуту" : "Загружаю позиции…";
   const t = $("#brokerTbl"); t.replaceChildren();
   t.append(el("thead", {}, el("tr", {}, ["Тикер","Название","Счёт","Кол-во","Средняя цена","Цена сейчас","За день","Стоимость","Результат"].map((h,i) => el("th", {class: i > 2 ? "num" : null, text:h})))));
   const tb = el("tbody"); let tv = 0, ti = 0, td = 0;
@@ -1207,6 +1273,7 @@ $("#fModeReal").onclick = () => { fMode = "real"; renderAll(true); };
 $("#fModeNom").onclick = () => { fMode = "nom"; renderAll(true); };
 $("#reloadBtn").onclick = () => load();
 $("#logoutBtn").onclick = () => logout();
+$("#brokerOff").onclick = () => { setTok(""); S.broker = []; S.portfolio = S.portfolio.filter(p => !p.broker); brokerState = ""; renderAll(true); };
 $("#sheetLink").href = SHEET_URL; $("#sheetLink2").href = SHEET_URL;
 
 /* ---------- routing ---------- */
