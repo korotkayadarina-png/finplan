@@ -1343,7 +1343,7 @@ function holdings(){
 function cleanName(n){ return (" " + String(n || "") + " ").replace(/["«»]/g, " ").replace(/\s(ПАО|ОАО|АО|НК|ао|ап|ап\.|ао\.)(?=\s)/g, " ").replace(/\s+/g, " ").trim(); }
 async function refreshNews(force){
   if (!getKey() || !API_URL) return;
-  if (!force && newsAt && Date.now() - newsAt.getTime() < 15 * 60000) return;
+  if (!force && newsAt && Date.now() - newsAt.getTime() < 5 * 60000) return;
   const items = holdings().filter(h => h.kind === "share" || (h.kind === "bond" && !/^SU\d/.test(h.ticker)))
     .map(h => ({ticker: h.ticker, q: '"' + (h.kind === "bond" ? cleanName(h.name).split(" ")[0] : cleanName(h.name)) + '"'}));
   items.push({ticker: "ЦБ", q: '"ключевая ставка" Банк России'});
@@ -1362,7 +1362,7 @@ async function refreshNews(force){
 }
 function renderNews(){
   const st = $("#newsStamp");
-  st.textContent = newsState === "loading" && !NEWS.length ? "Загружаю…" : newsState === "error" ? "Не удалось загрузить, повторю позже" : newsAt ? "обновлено в " + newsAt.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}) + " · автообновление каждые 15 минут" : "";
+  st.textContent = newsState === "loading" && !NEWS.length ? "Загружаю…" : newsState === "error" ? "Не удалось загрузить, повторю позже" : newsAt ? "обновлено в " + newsAt.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}) + " · автообновление каждые 5 минут" : "";
   const tks = ["ALL", "IMP", ...new Set(NEWS.map(n => n.ticker))];
   $("#newsFilter").replaceChildren(...tks.map(t => el("button", {class:"fbtn" + (newsFilter === t ? " on" : ""), onclick: () => { newsFilter = t; renderNews(); }}, t === "ALL" ? "Все" : t === "IMP" ? "Только важное" : t)));
   const list = NEWS.filter(n => newsFilter === "ALL" || (newsFilter === "IMP" ? n.imp : n.ticker === newsFilter)).slice(0, 30);

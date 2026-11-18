@@ -301,7 +301,7 @@ function newsFor_(items) {
           });
         }
       } catch (err) {}
-      cache.put(ck, JSON.stringify(list), 1800);
+      cache.put(ck, JSON.stringify(list), 270);
     }
     list.forEach(function (n) { out.push({ ticker: it.ticker || '', title: n.title, link: n.link, date: n.date, source: n.source }); });
   });
