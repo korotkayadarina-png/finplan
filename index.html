@@ -303,21 +303,25 @@ td.flash-down{animation:fldn 2s ease-out}
   <section class="view" id="v-portfolio">
     <div class="tiles" id="pTiles"></div>
     <div class="card">
+      <div class="card-head"><h2>По счетам</h2><span class="sub">стоимость сейчас и результат к вложенному</span></div>
+      <div class="tbl"><table id="acctTbl"></table></div>
+    </div>
+    <div class="card">
       <div class="card-head"><h2>Активы</h2><button class="hide" id="addAsset">+ актив</button></div>
       <div class="tbl"><table id="assetTbl"></table></div>
       <p class="note" style="margin-top:10px">Ожидаемая доходность: ставка по вкладу или счёту, доходность к погашению по облигации, для фондов твоя оценка. Обновляй «Сейчас стоит» раз в месяц, перед закрытием месяца.</p>
     </div>
     <div class="card hide" id="brokerCard">
-      <div class="card-head"><h2>Брокерский счёт (Т-Инвестиции)</h2><span class="sub" id="brokerStamp"></span></div>
+      <div class="card-head"><h2>Т-Инвестиции · брокерский счёт</h2><span class="sub" id="brokerStamp"></span></div>
       <div id="brokerConnect"></div>
       <div class="tbl"><table id="brokerTbl"></table></div>
       <p class="note" style="margin-top:10px">Позиции и цены приходят со счёта через API Т-Банка с токеном «только для чтения». Сайт запрашивает их напрямую из твоего браузера каждую минуту, пока он открыт. Позиции в валюте показаны, но в рублёвые итоги не входят.</p>
       <div class="row" style="margin-top:8px"><button id="brokerOff" class="hide">Отключить брокера на этом устройстве</button></div>
     </div>
     <div class="card">
-      <div class="card-head"><h2>Биржевые бумаги</h2><span class="sub" id="secStamp"></span></div>
+      <div class="card-head"><h2>СберИнвестиции · ИИС</h2><span class="sub" id="secStamp"></span></div>
       <div class="tbl"><table id="secTbl"></table></div>
-      <p class="note" style="margin-top:10px">Бумаги добавляются на листе «Бумаги» в таблице: тикер из списка, количество и цена покупки. Цены берутся с Московской биржи при открытии сайта (задержка около 15 минут). Облигации: цена = % от номинала × номинал + накопленный купон (НКД).</p>
+      <p class="note" style="margin-top:10px">Позиции ИИС вносятся вручную на листе «Бумаги» в таблице: тикер из списка, количество и средняя цена покупки (из приложения СберИнвестиций). Цены обновляются с Московской биржи каждую минуту (задержка биржи около 15 минут). Облигации: цена = % от номинала × номинал + накопленный купон (НКД).</p>
     </div>
     <div class="grid2">
       <div class="card">
@@ -686,7 +690,7 @@ async function refreshBroker(){
     const prev = {}; (S.broker || []).forEach(b => prev[b.account + "|" + b.ticker] = {price: b.price, rate: b.rate});
     S.broker = list.map(b => { const pv = prev[b.account + "|" + b.ticker]; return {...b, prevShown: pv ? pv.price : null, rate: pv ? pv.rate : 0}; });
     S.portfolio = S.portfolio.filter(p => !p.broker);
-    S.broker.filter(b => b.currency === "rub").forEach((b, i) => S.portfolio.push({id:"b_" + i, sec:true, broker:true, name: b.ticker + " · " + b.name, type: b.type, invested: b.invested, value: b.value, rate: b.rate || 0}));
+    S.broker.filter(b => b.currency === "rub").forEach((b, i) => S.portfolio.push({id:"b_" + i, sec:true, broker:true, acct: "tinv", name: b.ticker + " · " + b.name, type: b.type, invested: b.invested, value: b.value, rate: b.rate || 0}));
     brokerAt = new Date(); brokerState = "ok";
     if (!S._bondYieldsLoaded) loadBrokerYields();
   } catch(e){ brokerState = e && e.code === "auth" ? "auth" : "error"; }
@@ -811,7 +815,7 @@ function fromWorkbook(wb){
       price: n(Bm, "G"+r) || 0, rate: y == null ? 0 : (Math.abs(y) > 1 ? y : y * 100), live: false});
   }
   for (const sc of out.securities){
-    out.portfolio.push({id:"s_"+sc.ticker, sec:true, ticker: sc.ticker, name: sc.ticker + " · " + sc.name, type: sc.type,
+    out.portfolio.push({id:"s_"+sc.ticker, sec:true, ticker: sc.ticker, name: sc.ticker + " · " + sc.name, type: sc.type, acct: "sber",
       invested: sc.qty * sc.buy, value: sc.qty * sc.price, rate: sc.rate});
   }
   out.cushion = {months: n(C, "B4") || 6, essentials: n(C, "B5"), saved: n(C, "B6") || 0, monthly: n(C, "B7") || 0};
@@ -1230,7 +1234,33 @@ function renderBroker(){
     el("td", {class:"num", text: ti ? (tv - ti >= 0 ? "+" : "−") + rub(Math.abs(tv - ti)) : "—"})));
   t.append(tb);
 }
+function renderAccounts(){
+  const groups = [
+    {k:"tinv", name:"Т-Инвестиции", kind:"Брокерский счёт (БС)"},
+    {k:"sber", name:"СберИнвестиции", kind:"ИИС"},
+    {k:"other", name:"Вклады и счета", kind:"лист «Портфель»"}
+  ];
+  const tot = S.portfolio.reduce((t,a) => t + num(a.value), 0);
+  const t = $("#acctTbl"); t.replaceChildren();
+  t.append(el("thead", {}, el("tr", {}, ["Счёт","Тип","Позиций","Вложено","Стоимость","Результат","Доля"].map((h,i) => el("th", {class: i > 1 ? "num" : null, text:h})))));
+  const tb = el("tbody");
+  for (const g of groups){
+    const items = S.portfolio.filter(a => (a.acct || "other") === g.k);
+    if (!items.length && g.k !== "other") continue;
+    const v = items.reduce((s,a) => s + num(a.value), 0), inv = items.reduce((s,a) => s + num(a.invested), 0), d = v - inv;
+    tb.append(el("tr", {},
+      el("td", {style:"padding:8px 6px;font-weight:700", text:g.name}),
+      el("td", {style:"padding:8px 6px", class:"sub", text:g.kind}),
+      el("td", {class:"num", text:String(items.length)}),
+      el("td", {class:"num", text:rub(inv)}),
+      el("td", {class:"num", style:"font-weight:600", text:rub(v)}),
+      el("td", {class:"num", style:"color:" + (d >= 0 ? "var(--good)" : "var(--bad)"), text: inv ? (d >= 0 ? "+" : "−") + rub(Math.abs(d)) + " (" + (d >= 0 ? "+" : "−") + pct(Math.abs(d)/inv, 1) + ")" : "—"}),
+      el("td", {class:"num", text: tot ? pct(v/tot, 1) : "—"})));
+  }
+  t.append(tb);
+}
 function renderPortfolio(C, skip){
+  renderAccounts();
   renderBroker();
   renderSecurities();
   const pl = C.pVal - C.pInv;
