@@ -9,7 +9,6 @@
 <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
 <meta name="robots" content="noindex,nofollow">
 <script src="config.js"></script>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 /* Layout: sticky tab bar, summary tiles first, then section cards; one column on phones */
 :root{
@@ -153,9 +152,8 @@ textarea{width:100%;min-height:200px;font-family:ui-monospace,monospace;font-siz
     <div class="status">
       <span class="chip ex hide" id="exChip"></span>
       <span class="chip" id="saveChip"><span class="dot" id="saveDot"></span><span id="saveText">Загрузка…</span></span>
-      <button id="loginBtn" class="pri hide">Войти через Google</button>
       <button id="reloadBtn">Обновить</button>
-      <button id="logoutBtn" class="hide">Выйти</button>
+      <button id="logoutBtn" class="hide">Забыть ключ</button>
       <a class="chip" id="sheetLink" href="#" target="_blank" rel="noopener">Открыть таблицу ↗</a>
     </div>
   </header>
@@ -321,7 +319,7 @@ textarea{width:100%;min-height:200px;font-family:ui-monospace,monospace;font-siz
   <section class="view" id="v-settings">
     <div class="card">
       <h2>Откуда берутся цифры</h2>
-      <p class="note">Сайт после входа через Google читает твою Google Таблицу «Финансовый планер» (только чтение) и строит графики. В самом сайте никаких цифр не хранится: без входа под твоим аккаунтом он пустой. Доступ живёт около часа, потом просто войди снова.</p>
+      <p class="note">Сайт берёт цифры из твоей Google Таблицы «Финансовый планер» через твой скрипт Apps Script «Финансовый планер API». Скрипт отдаёт данные только по секретному ключу. Ключ хранится только в этом браузере на этом устройстве; в коде сайта и на GitHub его нет.</p>
       <p class="note" style="margin-top:8px">Как пользоваться: вводишь цифры в жёлтые ячейки таблицы → возвращаешься сюда → «Обновить».</p>
       <ul class="note" style="margin-top:8px">
         <li>Доходы и расходы: лист «Бюджет»</li>
@@ -546,92 +544,66 @@ function calc(){
     fStart, fMonthly, years, infl, scen, contribLine};
 }
 
-/* ---------- data source: Google Sheets API with Google sign-in ---------- */
+/* ---------- data source: Apps Script API with a secret key ---------- */
 const CFG = window.FINPLAN_CONFIG || {};
 const SHEET_ID = CFG.sheetId || "";
 const SHEET_URL = "https://docs.google.com/spreadsheets/d/" + SHEET_ID + "/edit";
-const SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
+const API_URL = CFG.apiUrl || "";
+const KEY_NAME = "finplan_api_key";
 function setStatus(kind, text){ $("#saveDot").className = "dot " + kind; $("#saveText").textContent = text; }
 function scheduleSave(){}
-function showMsg(kind, text, withRetry){
+function getKey(){ try { return localStorage.getItem(KEY_NAME) || ""; } catch(e){ return memKey; } }
+let memKey = "";
+function setKey(k){ memKey = k; try { if (k) localStorage.setItem(KEY_NAME, k); else localStorage.removeItem(KEY_NAME); } catch(e){} }
+function showMsg(kind, text){
   const box = $("#srcMsg");
   if (!text){ box.replaceChildren(); return; }
-  const c = el("div", {class:"callout " + kind}, el("span", {text}));
-  if (withRetry) c.append(" ", el("button", {style:"margin-left:8px", onclick: () => login()}, "Войти через Google"));
-  box.replaceChildren(c);
+  box.replaceChildren(el("div", {class:"callout " + kind}, el("span", {text})));
 }
-let token = null, tokenExp = 0, tokenClient = null;
-try { const t = JSON.parse(sessionStorage.getItem("finplan_token") || "null"); if (t && t.exp > Date.now() + 60000){ token = t.v; tokenExp = t.exp; } } catch(e){}
-function saveToken(){ try { sessionStorage.setItem("finplan_token", JSON.stringify({v:token, exp:tokenExp})); } catch(e){} }
+function askKey(note){
+  const inp = el("input", {id:"keyInput", type:"password", class:"inl", placeholder:"Вставь ключ API_KEY", autocomplete:"off", style:"max-width:360px"});
+  const save = el("button", {class:"pri", onclick: () => { const k = inp.value.trim(); if (!k) return; setKey(k); setAuthUI(); load(); }}, "Сохранить ключ");
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") save.click(); });
+  const box = el("div", {class:"callout"},
+    el("div", {style:"margin-bottom:8px", text: note || "Чтобы сайт показал твои цифры, вставь секретный ключ. Он в журнале выполнения скрипта «Финансовый планер API» (строка «API_KEY: …»). Нужно один раз на каждом устройстве."}),
+    el("div", {class:"row"}, inp, save));
+  $("#srcMsg").replaceChildren(box);
+  setStatus("", "Нужен ключ");
+}
 function setAuthUI(){
-  $("#loginBtn").classList.toggle("hide", !!token);
-  $("#logoutBtn").classList.toggle("hide", !token);
-  $("#reloadBtn").classList.toggle("hide", !token);
+  const has = !!getKey();
+  $("#logoutBtn").classList.toggle("hide", !has);
+  $("#reloadBtn").classList.toggle("hide", !has);
 }
-function initGIS(){
-  if (!CFG.clientId) return false;
-  if (!(window.google && google.accounts && google.accounts.oauth2)) return false;
-  if (tokenClient) return true;
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: CFG.clientId, scope: SCOPE,
-    callback: resp => {
-      if (resp.error){ setStatus("err", "Вход не выполнен"); showMsg("warn", "Google не дал доступ: " + resp.error + ". Попробуй войти ещё раз.", true); return; }
-      token = resp.access_token; tokenExp = Date.now() + (resp.expires_in || 3600) * 1000; saveToken(); setAuthUI(); load();
-    }
-  });
-  return true;
-}
-function login(){
-  if (!CFG.clientId){ setupMsg(); return; }
-  if (!initGIS()){ setStatus("busy", "Загружаю вход Google…"); setTimeout(login, 500); return; }
-  tokenClient.requestAccessToken({prompt: token ? "" : "select_account"});
-}
-function logout(){
-  if (token && window.google && google.accounts && google.accounts.oauth2) google.accounts.oauth2.revoke(token, () => {});
-  token = null; tokenExp = 0; try { sessionStorage.removeItem("finplan_token"); } catch(e){}
-  S = emptyState(); renderAll(); setAuthUI(); setStatus("", "Не выполнен вход"); showMsg("", "Ты вышла. Нажми «Войти через Google», чтобы снова увидеть свои цифры.", true);
-}
-function setupMsg(){
-  setStatus("err", "Сайт ещё не настроен");
-  showMsg("warn", "Сайту нужен Client ID от Google и ID таблицы в файле config.js. Как получить, написано в README репозитория.", false);
-}
-const SHEETS = {"Бюджет":"A1:I64", "Портфель":"A1:L31", "Подушка":"A1:B16", "Цели":"A1:J25", "Прогноз":"A1:K30", "История":"A1:F64"};
+function logout(){ setKey(""); S = emptyState(); renderAll(); setAuthUI(); askKey("Ключ удалён с этого устройства. Чтобы снова видеть цифры, вставь его ещё раз."); }
+const SHEETS = ["Бюджет", "Портфель", "Подушка", "Цели", "Прогноз", "История"];
 function colName(i){ let s = ""; i++; while (i > 0){ const m = (i-1) % 26; s = String.fromCharCode(65+m) + s; i = Math.floor((i-1)/26); } return s; }
 let loading = false;
 async function load(){
   if (loading) return;
-  if (!CFG.clientId || !SHEET_ID){ setupMsg(); return; }
-  if (!token || tokenExp < Date.now() + 30000){ token = null; setAuthUI(); setStatus("", "Не выполнен вход"); showMsg("", "Войди через Google, чтобы сайт прочитал твою таблицу.", true); return; }
+  if (!API_URL){ setStatus("err", "Сайт ещё не настроен"); showMsg("warn", "В config.js не указан адрес скрипта (apiUrl)."); return; }
+  const key = getKey();
+  if (!key){ askKey(); return; }
   loading = true; setStatus("busy", "Загружаю из таблицы…");
   try {
-    const qs = Object.entries(SHEETS).map(([n, r]) => "ranges=" + encodeURIComponent("'" + n + "'!" + r)).join("&");
-    const url = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(SHEET_ID) + "/values:batchGet?" + qs + "&valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER";
-    const r = await fetch(url, {headers: {Authorization: "Bearer " + token}});
-    if (r.status === 401){ token = null; try { sessionStorage.removeItem("finplan_token"); } catch(e){} setAuthUI(); throw {code:"auth"}; }
-    if (r.status === 403) throw {code:"forbidden"};
-    if (r.status === 404) throw {code:"notfound"};
+    const r = await fetch(API_URL, {method:"POST", body: JSON.stringify({key}), redirect:"follow"});
     if (!r.ok) throw {code:"http", status:r.status};
     const data = await r.json();
+    if (!data.ok){ if (data.error === "unauthorized"){ setKey(""); setAuthUI(); askKey("Ключ не подошёл. Проверь, что скопировала его целиком, и вставь ещё раз."); return; } throw {code:"api"}; }
     const wb = {Sheets:{}};
-    (data.valueRanges || []).forEach((vr, k) => {
-      const name = Object.keys(SHEETS)[k], ws = {};
-      (vr.values || []).forEach((row, ri) => row.forEach((val, ci) => { if (val !== "" && val != null) ws[colName(ci) + (ri+1)] = {v: val}; }));
+    SHEETS.forEach(name => {
+      const ws = {};
+      (data.sheets[name] || []).forEach((row, ri) => row.forEach((val, ci) => { if (val !== "" && val != null) ws[colName(ci) + (ri+1)] = {v: val}; }));
       wb.Sheets[name] = ws;
     });
     S = fromWorkbook(wb); renderAll();
-    setStatus("ok", "Обновлено в " + new Date().toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}));
+    setStatus("ok", "Обновлено в " + new Date(data.updated || Date.now()).toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}));
     const C = calc();
-    if (!C.incP && !C.pVal && !S.goals.length) showMsg("", "Таблица пока пустая. Заполни жёлтые ячейки в листах «Бюджет», «Портфель», «Подушка», «Цели» и нажми «Обновить».", false);
+    if (!C.incP && !C.pVal && !S.goals.length) showMsg("", "Таблица пока пустая. Заполни жёлтые ячейки в листах «Бюджет», «Портфель», «Подушка», «Цели» и нажми «Обновить».");
     else showMsg("", "");
   } catch(e){
-    const code = e && e.code;
     setStatus("err", "Не загрузилось");
-    const T = {
-      auth: "Вход истёк. Войди через Google ещё раз.",
-      forbidden: "У этого Google-аккаунта нет доступа к таблице или не включён Google Sheets API. Войди тем аккаунтом, где лежит таблица.",
-      notfound: "Таблица не найдена. Проверь ID таблицы в config.js.",
-    };
-    showMsg("warn", T[code] || ("Не получилось загрузить таблицу" + (e && e.status ? " (ошибка " + e.status + ")" : "") + ". Попробуй ещё раз через минуту."), code === "auth" || code === "forbidden");
+    showMsg("warn", "Не получилось загрузить таблицу" + (e && e.status ? " (ошибка " + e.status + ")" : "") + ". Проверь интернет и нажми «Обновить» через минуту.");
   } finally { loading = false; }
 }
 
@@ -1074,7 +1046,6 @@ function renderPortfolio(C, skip){
 $("#fModeReal").onclick = () => { fMode = "real"; renderAll(true); };
 $("#fModeNom").onclick = () => { fMode = "nom"; renderAll(true); };
 $("#reloadBtn").onclick = () => load();
-$("#loginBtn").onclick = () => login();
 $("#logoutBtn").onclick = () => logout();
 $("#sheetLink").href = SHEET_URL; $("#sheetLink2").href = SHEET_URL;
 
