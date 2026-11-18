@@ -104,7 +104,8 @@ function fetchBoard_(b) {
     } else {
       const cur = s[col('securities', 'CURRENCYID')];
       if (cur && cur !== 'SUR' && cur !== 'RUB') return; // rouble securities only
-      type = b.kind === 'share' ? 'Акции / фонды акций' : fundType_(secid, name);
+      const isFund = b.kind === 'fund' || /ETF|БПИФ|ПИФ/i.test(name || '') || MM_TICKERS.indexOf(secid) >= 0 || GOLD_TICKERS.indexOf(secid) >= 0;
+      type = isFund ? fundType_(secid, name) : 'Акции / фонды акций';
     }
     rows.push([secid, name, type, b.board, price, face, aci, Math.round(unit * 10000) / 10000, yld]);
   });
