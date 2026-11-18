@@ -13,10 +13,14 @@ const RANGES = {
 };
 
 function doPost(e) {
-  let key = '';
-  try { key = JSON.parse((e && e.postData && e.postData.contents) || '{}').key || ''; } catch (err) {}
+  let key = '', mode = '';
+  try { const b = JSON.parse((e && e.postData && e.postData.contents) || '{}'); key = b.key || ''; mode = b.mode || ''; } catch (err) {}
   const expected = PropertiesService.getScriptProperties().getProperty('API_KEY');
   if (!expected || key !== expected) return json_({ ok: false, error: 'unauthorized' });
+  if (mode === 'broker') {
+    try { return json_({ ok: true, updated: new Date().toISOString(), broker: brokerPortfolio_() }); }
+    catch (err) { return json_({ ok: false, error: String(err && err.message || err).indexOf('no_token') >= 0 ? 'no_token' : 'broker_error', detail: String(err && err.message || err).slice(0, 200) }); }
+  }
   const ss = SpreadsheetApp.openById(SHEET_ID);
   const tz = ss.getSpreadsheetTimeZone();
   const sheets = {};
@@ -184,4 +188,79 @@ function setupSecurities() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'updateQuotes') ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('updateQuotes').timeBased().everyMinutes(30).create();
   console.log('Done: sheet "Бумаги" created, quotes loaded: ' + (ss.getSheetByName('Котировки').getLastRow() - 1));
+}
+
+// ===================== T-Invest API (read-only token in Script properties: TINVEST_TOKEN) =====================
+const TINV_BASES = ['https://invest-public-api.tbank.ru/rest/', 'https://invest-public-api.tinkoff.ru/rest/'];
+
+function tCall_(method, body) {
+  const token = PropertiesService.getScriptProperties().getProperty('TINVEST_TOKEN');
+  if (!token) throw new Error('no_token');
+  let last = null;
+  for (let k = 0; k < TINV_BASES.length; k++) {
+    let res;
+    try {
+      res = UrlFetchApp.fetch(TINV_BASES[k] + 'tinkoff.public.invest.api.contract.v1.' + method, {
+        method: 'post', contentType: 'application/json', payload: JSON.stringify(body || {}),
+        headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
+      });
+    } catch (err) { last = err; continue; }
+    const code = res.getResponseCode();
+    if (code === 200) return JSON.parse(res.getContentText());
+    last = new Error('tinvest HTTP ' + code + ': ' + res.getContentText().slice(0, 150));
+    if (code === 401 || code === 403) throw last;
+  }
+  throw last;
+}
+
+function q_(m) { return m ? Number(m.units || 0) + Number(m.nano || 0) / 1e9 : 0; }
+
+function instrument_(uid) {
+  const cache = CacheService.getScriptCache();
+  const c = cache.get('i_' + uid);
+  if (c) return JSON.parse(c);
+  const r = tCall_('InstrumentsService/GetInstrumentBy', { idType: 'INSTRUMENT_ID_TYPE_UID', id: uid });
+  const i = r.instrument || {};
+  const o = { ticker: i.ticker || '', name: i.name || '' };
+  cache.put('i_' + uid, JSON.stringify(o), 21600);
+  return o;
+}
+
+function brokerType_(it, ticker, name) {
+  if (it === 'share') return 'Акции / фонды акций';
+  if (it === 'bond') return /^SU\d/.test(ticker) ? 'ОФЗ' : 'Корп. облигации';
+  if (it === 'etf') return fundType_(ticker, name);
+  if (it === 'currency') return /^RUB/.test(ticker) ? 'Наличные' : 'Валюта';
+  return 'Другое';
+}
+
+// Positions of all open accounts. Prices are in the instrument currency (field "currency"); the site sums only rouble ones.
+function brokerPortfolio_() {
+  const acc = tCall_('UsersService/GetAccounts', {});
+  const out = [];
+  (acc.accounts || []).filter(function (a) { return a.status === 'ACCOUNT_STATUS_OPEN'; }).forEach(function (a) {
+    const p = tCall_('OperationsService/GetPortfolio', { accountId: a.id, currency: 'RUB' });
+    (p.positions || []).forEach(function (pos) {
+      const qty = q_(pos.quantity);
+      if (!qty) return;
+      const inf = pos.instrumentUid ? instrument_(pos.instrumentUid) : { ticker: pos.figi, name: '' };
+      const cur = ((pos.currentPrice || {}).currency || 'rub').toLowerCase();
+      const price = q_(pos.currentPrice), nkd = q_(pos.currentNkd), avg = q_(pos.averagePositionPrice);
+      out.push({
+        account: a.name || 'Счёт', ticker: inf.ticker || pos.figi, name: inf.name || inf.ticker || pos.figi,
+        instrumentType: pos.instrumentType, type: brokerType_(pos.instrumentType, inf.ticker, inf.name),
+        qty: qty, price: price, nkd: nkd, avg: avg, currency: cur,
+        value: qty * (price + nkd), invested: qty * avg, dailyYield: q_(pos.dailyYield)
+      });
+    });
+  });
+  return out;
+}
+
+// Check from the editor: prints how many positions were found (no token or amounts in the log).
+function testBroker() {
+  const b = brokerPortfolio_();
+  const accs = {};
+  b.forEach(function (x) { accs[x.account] = (accs[x.account] || 0) + 1; });
+  console.log('Broker OK. Positions by account: ' + JSON.stringify(accs));
 }

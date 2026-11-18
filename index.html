@@ -307,6 +307,11 @@ td.flash-down{animation:fldn 2s ease-out}
       <div class="tbl"><table id="assetTbl"></table></div>
       <p class="note" style="margin-top:10px">Ожидаемая доходность: ставка по вкладу или счёту, доходность к погашению по облигации, для фондов твоя оценка. Обновляй «Сейчас стоит» раз в месяц, перед закрытием месяца.</p>
     </div>
+    <div class="card hide" id="brokerCard">
+      <div class="card-head"><h2>Брокерский счёт (Т-Инвестиции)</h2><span class="sub" id="brokerStamp"></span></div>
+      <div class="tbl"><table id="brokerTbl"></table></div>
+      <p class="note" style="margin-top:10px">Позиции и цены приходят со счёта через API брокера с токеном «только для чтения». Обновляется каждую минуту, пока сайт открыт. Позиции в валюте показаны, но в рублёвые итоги не входят.</p>
+    </div>
     <div class="card">
       <div class="card-head"><h2>Биржевые бумаги</h2><span class="sub" id="secStamp"></span></div>
       <div class="tbl"><table id="secTbl"></table></div>
@@ -605,12 +610,43 @@ async function fetchQuotes(tickers){
       const px = pk("LAST") || pk("MARKETPRICE") || pk("LCURRENTPRICE") || sx[ci("securities","PREVPRICE")];
       if (!px) return;
       let unit = px;
+      if (market === "bonds" && !sx[ci("securities","FACEVALUE")]) return;
       if (market === "bonds"){ const face = sx[ci("securities","FACEVALUE")] || 1000, aci = sx[ci("securities","ACCRUEDINT")] || 0; unit = px * face / 100 + aci; }
       const prev = sx[ci("securities","PREVPRICE")];
       out[id] = {unit, time: pk("UPDATETIME"), day: prev ? (px - prev) / prev : null, yld: market === "bonds" && pk("YIELD") ? pk("YIELD") : null};
     });
   }));
   return out;
+}
+/* ---------- broker account via Apps Script (T-Invest read-only token stays in the script) ---------- */
+let brokerAt = null, brokerState = "";
+async function refreshBroker(){
+  const key = getKey(); if (!key || !API_URL) return;
+  try {
+    const r = await fetch(API_URL, {method:"POST", body: JSON.stringify({key, mode:"broker"})});
+    const d = await r.json();
+    if (!d.ok){ brokerState = d.error || "error"; if (d.error === "unauthorized"){ return; } renderAll(true); return; }
+    const prev = {}; (S.broker || []).forEach(b => prev[b.account + "|" + b.ticker] = b.price);
+    S.broker = (d.broker || []).map(b => ({...b, prevShown: prev[b.account + "|" + b.ticker] != null ? prev[b.account + "|" + b.ticker] : null}));
+    S.portfolio = S.portfolio.filter(p => !p.broker);
+    S.broker.filter(b => b.currency === "rub").forEach((b, i) => {
+      S.portfolio.push({id:"b_" + i, sec:true, broker:true, name: b.ticker + " · " + b.name, type: b.type, invested: b.invested, value: b.value, rate: b.rate || 0});
+    });
+    brokerAt = new Date(); brokerState = "ok";
+    if (!S._bondYieldsLoaded) loadBrokerYields();
+  } catch(e){ brokerState = "error"; }
+  renderAll(true);
+}
+async function loadBrokerYields(){
+  const bonds = (S.broker || []).filter(b => b.instrumentType === "bond" && b.currency === "rub").map(b => b.ticker);
+  S._bondYieldsLoaded = true;
+  if (!bonds.length) return;
+  try {
+    const q = await fetchQuotes(bonds);
+    S.broker.forEach(b => { const qq = q[b.ticker]; if (qq && qq.yld) b.rate = qq.yld; });
+    S.portfolio.filter(p => p.broker).forEach(p => { const b = S.broker.find(x => p.name.startsWith(x.ticker + " · ")); if (b && b.rate) p.rate = b.rate; });
+    renderAll(true);
+  } catch(e){}
 }
 async function refreshQuotes(){
   const tks = S.securities.map(x => x.ticker);
@@ -649,6 +685,7 @@ async function load(){
     S = fromWorkbook(wb); renderAll();
     setStatus("ok", "Обновлено в " + new Date(data.updated || Date.now()).toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}));
     if (S.securities && S.securities.length) refreshQuotes();
+    refreshBroker();
     const C = calc();
     if (!C.incP && !C.pVal && !S.goals.length) showMsg("", "Таблица пока пустая. Заполни жёлтые ячейки в листах «Бюджет», «Портфель», «Подушка», «Цели» и нажми «Обновить».");
     else showMsg("", "");
@@ -1097,7 +1134,38 @@ function renderSecurities(){
   t.append(tb);
   if (list.some(x => !x.live) && quotesAt) $("#secStamp").textContent += " · * цена из таблицы";
 }
+function renderBroker(){
+  const card = $("#brokerCard");
+  const list = S.broker || [];
+  if (!list.length && brokerState !== "error" && brokerState !== "broker_error"){ card.classList.add("hide"); return; }
+  card.classList.remove("hide");
+  $("#brokerStamp").textContent = brokerState === "ok" && brokerAt ? "● Со счёта, обновлено в " + brokerAt.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit", second:"2-digit"}) + " · автообновление каждую минуту" : "Брокер не ответил, повторю через минуту";
+  const t = $("#brokerTbl"); t.replaceChildren();
+  t.append(el("thead", {}, el("tr", {}, ["Тикер","Название","Счёт","Кол-во","Средняя цена","Цена сейчас","За день","Стоимость","Результат"].map((h,i) => el("th", {class: i > 2 ? "num" : null, text:h})))));
+  const tb = el("tbody"); let tv = 0, ti = 0, td = 0;
+  for (const b of list){
+    const rubPos = b.currency === "rub", d = b.value - b.invested, cur = rubPos ? " ₽" : " " + b.currency.toUpperCase();
+    if (rubPos){ tv += b.value; ti += b.invested; td += b.dailyYield; }
+    const flash = b.prevShown != null && b.prevShown !== b.price ? (b.price > b.prevShown ? " flash-up" : " flash-down") : "";
+    tb.append(el("tr", {},
+      el("td", {style:"padding:8px 6px;font-weight:700", text: b.ticker}),
+      el("td", {style:"padding:8px 6px", text: b.name}),
+      el("td", {style:"padding:8px 6px", class:"sub", text: b.account}),
+      el("td", {class:"num", text: fmt(b.qty, 2)}),
+      el("td", {class:"num", text: b.avg ? fmt(b.avg, 2) + cur : "—"}),
+      el("td", {class:"num" + flash, text: fmt(b.price + (b.nkd || 0), 2) + cur}),
+      el("td", {class:"num", style:"color:" + (b.dailyYield >= 0 ? "var(--good)" : "var(--bad)"), text: b.dailyYield ? (b.dailyYield >= 0 ? "+" : "−") + fmt(Math.abs(b.dailyYield), 0) + cur : "—"}),
+      el("td", {class:"num", text: fmt(b.value, 0) + cur}),
+      el("td", {class:"num", style:"font-weight:600;color:" + (d >= 0 ? "var(--good)" : "var(--bad)"), text: b.invested ? (d >= 0 ? "+" : "−") + fmt(Math.abs(d), 0) + cur + " (" + (d >= 0 ? "+" : "−") + pct(Math.abs(d)/b.invested, 1) + ")" : "—"})
+    ));
+  }
+  if (list.length) tb.append(el("tr", {class:"total"}, el("td", {text:"Итого в ₽"}), el("td"), el("td"), el("td"), el("td"), el("td"),
+    el("td", {class:"num", text: (td >= 0 ? "+" : "−") + rub(Math.abs(td))}), el("td", {class:"num", text: rub(tv)}),
+    el("td", {class:"num", text: ti ? (tv - ti >= 0 ? "+" : "−") + rub(Math.abs(tv - ti)) : "—"})));
+  t.append(tb);
+}
 function renderPortfolio(C, skip){
+  renderBroker();
   renderSecurities();
   const pl = C.pVal - C.pInv;
   $("#pTiles").replaceChildren(
@@ -1163,7 +1231,7 @@ let lastSheetLoad = Date.now();
 function autoTick(){
   if (document.hidden || !getKey()) return;
   if (Date.now() - lastSheetLoad > 5 * 60000){ lastSheetLoad = Date.now(); load(); }
-  else if (S.securities && S.securities.length) refreshQuotes();
+  else { if (S.securities && S.securities.length) refreshQuotes(); refreshBroker(); }
 }
 setInterval(autoTick, 60000);
 document.addEventListener("visibilitychange", autoTick);
