@@ -303,6 +303,11 @@ textarea{width:100%;min-height:200px;font-family:ui-monospace,monospace;font-siz
       <div class="tbl"><table id="assetTbl"></table></div>
       <p class="note" style="margin-top:10px">Ожидаемая доходность: ставка по вкладу или счёту, доходность к погашению по облигации, для фондов твоя оценка. Обновляй «Сейчас стоит» раз в месяц, перед закрытием месяца.</p>
     </div>
+    <div class="card">
+      <div class="card-head"><h2>Биржевые бумаги</h2><span class="sub" id="secStamp"></span></div>
+      <div class="tbl"><table id="secTbl"></table></div>
+      <p class="note" style="margin-top:10px">Бумаги добавляются на листе «Бумаги» в таблице: тикер из списка, количество и цена покупки. Цены берутся с Московской биржи при открытии сайта (задержка около 15 минут). Облигации: цена = % от номинала × номинал + накопленный купон (НКД).</p>
+    </div>
     <div class="grid2">
       <div class="card">
         <h2>Структура по типам</h2>
@@ -576,7 +581,46 @@ function setAuthUI(){
   $("#reloadBtn").classList.toggle("hide", !has);
 }
 function logout(){ setKey(""); S = emptyState(); renderAll(); setAuthUI(); askKey("Ключ удалён с этого устройства. Чтобы снова видеть цифры, вставь его ещё раз."); }
-const SHEETS = ["Бюджет", "Портфель", "Подушка", "Цели", "Прогноз", "История"];
+const SHEETS = ["Бюджет", "Портфель", "Подушка", "Цели", "Прогноз", "История", "Бумаги"];
+/* ---------- live MOEX quotes (ISS, ~15 min delay) ---------- */
+const BOARDS = [["shares","TQBR"],["shares","TQTF"],["bonds","TQOB"],["bonds","TQCB"]];
+let quotesAt = null, quotesErr = false;
+async function fetchQuotes(tickers){
+  const want = new Set(tickers), out = {};
+  await Promise.all(BOARDS.map(async ([market, board]) => {
+    const url = "https://iss.moex.com/iss/engines/stock/markets/" + market + "/boards/" + board +
+      "/securities.json?iss.meta=off&iss.only=securities,marketdata&securities=" + encodeURIComponent([...want].join(",")) +
+      "&securities.columns=SECID,SHORTNAME,PREVPRICE,FACEVALUE,ACCRUEDINT&marketdata.columns=SECID,LAST,MARKETPRICE,LCURRENTPRICE,YIELD,UPDATETIME";
+    const r = await fetch(url); if (!r.ok) throw new Error("moex " + r.status);
+    const j = await r.json();
+    const ci = (b, c) => j[b].columns.indexOf(c);
+    const md = {}; j.marketdata.data.forEach(m => md[m[ci("marketdata","SECID")]] = m);
+    j.securities.data.forEach(sx => {
+      const id = sx[ci("securities","SECID")]; if (!want.has(id) || (out[id] && market !== "bonds")) return;
+      const m = md[id] || [], pk = c => { const i = ci("marketdata", c); return i >= 0 ? m[i] : null; };
+      const px = pk("LAST") || pk("MARKETPRICE") || pk("LCURRENTPRICE") || sx[ci("securities","PREVPRICE")];
+      if (!px) return;
+      let unit = px;
+      if (market === "bonds"){ const face = sx[ci("securities","FACEVALUE")] || 1000, aci = sx[ci("securities","ACCRUEDINT")] || 0; unit = px * face / 100 + aci; }
+      out[id] = {unit, time: pk("UPDATETIME"), yld: market === "bonds" && pk("YIELD") ? pk("YIELD") : null};
+    });
+  }));
+  return out;
+}
+async function refreshQuotes(){
+  const tks = S.securities.map(x => x.ticker);
+  try {
+    const q = await fetchQuotes(tks);
+    for (const sc of S.securities){
+      const qq = q[sc.ticker]; if (!qq) continue;
+      sc.price = qq.unit; sc.live = true;
+      const row = S.portfolio.find(p => p.id === "s_" + sc.ticker);
+      if (row){ row.value = sc.qty * sc.price; }
+    }
+    quotesAt = new Date(); quotesErr = false;
+  } catch(e){ quotesErr = true; }
+  renderAll();
+}
 function colName(i){ let s = ""; i++; while (i > 0){ const m = (i-1) % 26; s = String.fromCharCode(65+m) + s; i = Math.floor((i-1)/26); } return s; }
 let loading = false;
 async function load(){
@@ -598,6 +642,7 @@ async function load(){
     });
     S = fromWorkbook(wb); renderAll();
     setStatus("ok", "Обновлено в " + new Date(data.updated || Date.now()).toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}));
+    if (S.securities && S.securities.length) refreshQuotes();
     const C = calc();
     if (!C.incP && !C.pVal && !S.goals.length) showMsg("", "Таблица пока пустая. Заполни жёлтые ячейки в листах «Бюджет», «Портфель», «Подушка», «Цели» и нажми «Обновить».");
     else showMsg("", "");
@@ -649,6 +694,20 @@ function fromWorkbook(wb){
     const name = t(P, "A"+r), inv = n(P, "C"+r), val = n(P, "D"+r);
     if (!name && inv == null && val == null) continue;
     out.portfolio.push({id:"p"+r, name: name || "Без названия", type: t(P, "B"+r) || "Другое", invested: inv || 0, value: val == null ? (inv || 0) : val, rate: pct(P, "E"+r, 0)});
+  }
+  const Bm = sh("Бумаги");
+  out.securities = [];
+  for (let r = 5; r <= 54; r++){
+    const tk = t(Bm, "A"+r).toUpperCase(), qty = n(Bm, "B"+r);
+    if (!tk || !qty) continue;
+    const yIn = n(Bm, "D"+r), yCalc = n(Bm, "K"+r);
+    const y = yIn != null ? yIn : yCalc;
+    out.securities.push({ticker: tk, qty, buy: n(Bm, "C"+r) || 0, name: t(Bm, "E"+r) || tk, type: t(Bm, "F"+r) || "Другое",
+      price: n(Bm, "G"+r) || 0, rate: y == null ? 0 : (Math.abs(y) > 1 ? y : y * 100), live: false});
+  }
+  for (const sc of out.securities){
+    out.portfolio.push({id:"s_"+sc.ticker, sec:true, ticker: sc.ticker, name: sc.ticker + " · " + sc.name, type: sc.type,
+      invested: sc.qty * sc.buy, value: sc.qty * sc.price, rate: sc.rate});
   }
   out.cushion = {months: n(C, "B4") || 6, essentials: n(C, "B5"), saved: n(C, "B6") || 0, monthly: n(C, "B7") || 0};
   out.goals = [];
@@ -1006,7 +1065,33 @@ function renderForecast(C, skip){
   ))));
 }
 
+function renderSecurities(){
+  const list = S.securities || [];
+  const t = $("#secTbl"); t.replaceChildren();
+  $("#secStamp").textContent = !list.length ? "" : quotesErr ? "Мосбиржа не ответила, цены из таблицы" : quotesAt ? "Цены Мосбиржи на " + quotesAt.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}) + " (задержка ~15 мин)" : "Загружаю цены…";
+  t.append(el("thead", {}, el("tr", {}, ["Тикер","Название","Кол-во","Цена покупки","Цена сейчас","Стоимость","Результат"].map((h,i) => el("th", {class: i > 1 ? "num" : null, text:h})))));
+  const tb = el("tbody");
+  if (!list.length) tb.append(el("tr", {}, el("td", {colspan:7, class:"sub", text:"Бумаг пока нет. Добавь их на листе «Бумаги» в таблице."})));
+  let tv = 0, ti = 0;
+  for (const sc of list){
+    const v = sc.qty * sc.price, inv = sc.qty * sc.buy, d = v - inv; tv += v; ti += inv;
+    tb.append(el("tr", {},
+      el("td", {style:"padding:8px 6px;font-weight:700", text: sc.ticker}),
+      el("td", {style:"padding:8px 6px", text: sc.name}),
+      el("td", {class:"num", text: fmt(sc.qty, 2)}),
+      el("td", {class:"num", text: sc.buy ? fmt(sc.buy, 2) + " ₽" : "—"}),
+      el("td", {class:"num", text: fmt(sc.price, 2) + " ₽" + (sc.live ? "" : " *")}),
+      el("td", {class:"num", text: rub(v)}),
+      el("td", {class:"num", style:"font-weight:600;color:" + (d >= 0 ? "var(--good)" : "var(--bad)"), text: inv ? (d >= 0 ? "+" : "−") + rub(Math.abs(d)) + " (" + (d >= 0 ? "+" : "−") + pct(Math.abs(d)/inv, 1) + ")" : "—"})
+    ));
+  }
+  if (list.length) tb.append(el("tr", {class:"total"}, el("td", {text:"Итого"}), el("td"), el("td"), el("td"), el("td"),
+    el("td", {class:"num", text: rub(tv)}), el("td", {class:"num", text: ti ? (tv-ti >= 0 ? "+" : "−") + rub(Math.abs(tv-ti)) : "—"})));
+  t.append(tb);
+  if (list.some(x => !x.live) && quotesAt) $("#secStamp").textContent += " · * цена из таблицы";
+}
 function renderPortfolio(C, skip){
+  renderSecurities();
   const pl = C.pVal - C.pInv;
   $("#pTiles").replaceChildren(
     tile("Стоимость", rub(C.pVal), "вложено " + rub(C.pInv), "acc"),
@@ -1015,7 +1100,7 @@ function renderPortfolio(C, skip){
     tile("Доход в год", rub(C.pIncome), "≈ " + rub(C.pIncome/12) + " в месяц", "acc")
   );
   if (!skip){
-    editTable($("#assetTbl"), S.portfolio, [
+    editTable($("#assetTbl"), S.portfolio.filter(a => !a.sec), [
       {key:"name", label:"Актив", w:"150px"},
       {key:"type", label:"Тип", type:"select", options:Object.fromEntries(ASSET_TYPES.map(t=>[t,t])), def:"Другое"},
       {key:"invested", label:"Вложено, ₽", type:"number", step:1000, min:0},
@@ -1025,7 +1110,7 @@ function renderPortfolio(C, skip){
     ]);
   } else {
     const v = C.pVal;
-    const tbA = $("#assetTbl tbody"); if (tbA) S.portfolio.forEach((r,i) => { const row = tbA.children[i]; if (row) row.children[5].replaceChildren(el("span", {text: v ? pct(num(r.value)/v,1) : "—"})); });
+    const tbA = $("#assetTbl tbody"); if (tbA) S.portfolio.filter(a => !a.sec).forEach((r,i) => { const row = tbA.children[i]; if (row) row.children[5].replaceChildren(el("span", {text: v ? pct(num(r.value)/v,1) : "—"})); });
   }
   const pal = PALETTE();
   const parts = Object.entries(C.byType).sort((a,b)=>b[1]-a[1]).map(([n,v],i) => ({name:n, v, color:pal[i % pal.length]}));
