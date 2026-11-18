@@ -133,6 +133,11 @@ function updateQuotes() {
 }
 
 // Run once: creates sheet "Бумаги", links it to "Портфель", loads quotes and refreshes them every 30 minutes.
+// Formulas below are written with commas; spreadsheets in comma-decimal locales (ru, …) need semicolons.
+function fx_(ss, f) {
+  return /^(ru|uk|be|kk|de|fr|es|it|pt|pl|tr|nl|cs|sv|fi|da|nb|id)/.test(ss.getSpreadsheetLocale() || '') ? f.replace(/,/g, ';') : f;
+}
+
 function setupSecurities() {
   const ss = SpreadsheetApp.openById(SHEET_ID);
   updateQuotes();
@@ -163,27 +168,27 @@ function setupSecurities() {
       '=IF(OR(A' + r + '="",$H$55=0),"",H' + r + '/$H$55)'
     ]);
   }
-  sh.getRange(N0, 5, n, 8).setFormulas(f);
+  sh.getRange(N0, 5, n, 8).setFormulas(f.map(function (row) { return row.map(function (x) { return fx_(ss, x); }); }));
   sh.getRange(N0, 7, n, 4).setNumberFormat('#,##0 ₽');
   sh.getRange(N0, 11, n, 2).setNumberFormat('0.0%');
   sh.getRange('A55').setValue('Итого').setFontWeight('bold');
-  sh.getRange('H55').setFormula('=SUM(H5:H54)').setNumberFormat('#,##0 ₽').setFontWeight('bold');
-  sh.getRange('I55').setFormula('=SUM(I5:I54)').setNumberFormat('#,##0 ₽').setFontWeight('bold');
-  sh.getRange('J55').setFormula('=H55-I55').setNumberFormat('+#,##0 ₽;-#,##0 ₽;0 ₽').setFontWeight('bold');
-  sh.getRange('K55').setFormula('=IF(H55=0,0,SUMPRODUCT(IFERROR(H5:H54*K5:K54,0))/H55)').setNumberFormat('0.0%').setFontWeight('bold');
+  sh.getRange('H55').setFormula(fx_(ss, '=SUM(H5:H54)')).setNumberFormat('#,##0 ₽').setFontWeight('bold');
+  sh.getRange('I55').setFormula(fx_(ss, '=SUM(I5:I54)')).setNumberFormat('#,##0 ₽').setFontWeight('bold');
+  sh.getRange('J55').setFormula(fx_(ss, '=H55-I55')).setNumberFormat('+#,##0 ₽;-#,##0 ₽;0 ₽').setFontWeight('bold');
+  sh.getRange('K55').setFormula(fx_(ss, '=IF(H55=0,0,SUMPRODUCT(IFERROR(H5:H54*K5:K54,0))/H55)')).setNumberFormat('0.0%').setFontWeight('bold');
   sh.getRange('A57').setValue('Котировки обновлены:');
-  sh.getRange('C57').setFormula('=Котировки!K2').setNumberFormat('dd.MM.yyyy HH:mm');
+  sh.getRange('C57').setFormula(fx_(ss, '=Котировки!K2')).setNumberFormat('dd.MM.yyyy HH:mm');
   sh.setColumnWidth(1, 90); sh.setColumnWidths(2, 3, 120); sh.setColumnWidth(5, 220); sh.setColumnWidth(6, 170); sh.setColumnWidths(7, 6, 120);
   sh.setFrozenRows(4);
 
   // "Портфель": totals and structure include securities
   const p = ss.getSheetByName('Портфель');
   p.getRange('A31').setValue('В итогах учтён лист «Бумаги» (биржевые бумаги по текущим ценам).').setFontSize(9).setFontColor('#5C6B7A');
-  p.getRange('C30').setFormula('=SUM(C5:C29)+Бумаги!I55');
-  p.getRange('D30').setFormula('=SUM(D5:D29)+Бумаги!H55');
-  p.getRange('G30').setFormula('=SUM(G5:G29)+SUMPRODUCT(IFERROR(Бумаги!H5:H54*Бумаги!K5:K54,0))');
+  p.getRange('C30').setFormula(fx_(ss, '=SUM(C5:C29)+Бумаги!I55'));
+  p.getRange('D30').setFormula(fx_(ss, '=SUM(D5:D29)+Бумаги!H55'));
+  p.getRange('G30').setFormula(fx_(ss, '=SUM(G5:G29)+SUMPRODUCT(IFERROR(Бумаги!H5:H54*Бумаги!K5:K54,0))'));
   for (let r = 5; r <= 14; r++) {
-    p.getRange('K' + r).setFormula('=SUMIF($B$5:$B$29,J' + r + ',$D$5:$D$29)+SUMIF(Бумаги!$F$5:$F$54,J' + r + ',Бумаги!$H$5:$H$54)');
+    p.getRange('K' + r).setFormula(fx_(ss, '=SUMIF($B$5:$B$29,J' + r + ',$D$5:$D$29)+SUMIF(Бумаги!$F$5:$F$54,J' + r + ',Бумаги!$H$5:$H$54)'));
   }
 
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'updateQuotes') ScriptApp.deleteTrigger(t); });
